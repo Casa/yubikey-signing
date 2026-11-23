@@ -12,7 +12,7 @@ import {
 import { SpinningLoader } from 'src/components/Loaders'
 import Spacer from 'src/components/Spacer'
 import COLOR from 'src/constants/color'
-import { Device } from 'src/constants/device'
+import { DEVICE_TYPE, Device } from 'src/constants/device'
 import LINK from 'src/constants/link'
 import {
   DefaultButton,
@@ -36,7 +36,7 @@ import {
   WebWalletProvider,
   useWebWallet,
 } from 'src/features/device-signing/hooks/useWebWallet'
-import useFeatureFlags from 'src/hooks/useFeatureFlags'
+import { supportReferenceFor } from 'src/features/device-signing/utils/parseError'
 import useTranslate from 'src/hooks/useTranslate'
 import { ReactComponent as AlertCircleThin } from 'src/images/alert-circle-thin-icon.svg'
 import { ReactComponent as CheckmarkCircleThin } from 'src/images/checkmark-circle-thin-icon.svg'
@@ -99,13 +99,14 @@ export function YubikeySetupStart() {
       title={translate('yubikey_setup_title')}
       subTitle={translate('yubikey_setup_subtitle')}
       primaryButton={
-        <DefaultButton onClick={onContinue}>
+        <DefaultButton onClick={onContinue} data-testid='continue-button'>
           {translate('continue')}
         </DefaultButton>
       }
       secondaryButton={
         <SecondaryButton
           onClick={() => onForward(DEVICE_STEPS.DEVICE_SELECTION)}
+          data-testid='choose-different--device-button'
         >
           {translate('choose_different_device')}
         </SecondaryButton>
@@ -197,7 +198,7 @@ function YubikeySetupConfirm() {
         />
       }
       primaryButton={
-        <DefaultButton onClick={onContinue}>
+        <DefaultButton onClick={onContinue} data-testid='continue-button'>
           {translate('yubikey_reauth_continue')}
         </DefaultButton>
       }
@@ -219,8 +220,9 @@ function YubikeyWalletLoading() {
     useWebWallet()
 
   const [passkeyPrompted, setPasskeyPrompted] = useState(false)
-  const [minimumTimePassed, setMinimumTimePassed] =
-    useState<boolean | null>(null)
+  const [minimumTimePassed, setMinimumTimePassed] = useState<boolean | null>(
+    null,
+  )
   const timerRef = useRef<number | null>(null)
 
   useEffect(() => {
@@ -273,7 +275,7 @@ function YubikeyWalletLoading() {
     return (
       <DeviceConfirmation
         title={translate('yubikey_reauth_loading_title')}
-        interaction={<SpinningLoader size={45} color={COLOR.PURPLE_01} />}
+        interaction={<SpinningLoader size={45} />}
       />
     )
   }
@@ -297,47 +299,14 @@ function YubikeyWalletLoading() {
  */
 function YubikeySuccess() {
   const { translate } = useTranslate()
-  const { featureFlags } = useFeatureFlags()
   const { onForward } = useDeviceNavigation()
 
-  if (featureFlags.enableYubikeySeedExport) {
-    const onExport = () => {
-      void onForward(DEVICE_STEPS.YUBIKEY_EXPORT_START)
-    }
+  const onExport = () => {
+    void onForward(DEVICE_STEPS.YUBIKEY_EXPORT_START)
+  }
 
-    const onSkip = () => {
-      void onForward(DEVICE_STEPS.YUBIKEY_EXPORT_SUCCESS)
-    }
-
-    return (
-      <DeviceConfirmation
-        titleIcon={
-          <CheckmarkCircleThin
-            width='54px'
-            height='54px'
-            css={css`
-              path {
-                fill: ${COLOR.TEAL_500};
-              }
-            `}
-          />
-        }
-        key={DEVICE_STEPS.YUBIKEY_SUCCESS}
-        title={translate('yubikey_setup_success_title')}
-        subTitle={translate('yubikey_setup_success_subtitle')}
-        warnings={[<SeedWarning />]}
-        primaryButton={
-          <DefaultButton onClick={onExport}>
-            {translate('yubikey_setup_success_cta_export')}
-          </DefaultButton>
-        }
-        secondaryButton={
-          <SecondaryButton onClick={onSkip}>
-            {translate('yubikey_setup_success_cta_skip')}
-          </SecondaryButton>
-        }
-      />
-    )
+  const onSkip = () => {
+    void onForward(DEVICE_STEPS.YUBIKEY_EXPORT_SUCCESS)
   }
 
   return (
@@ -355,7 +324,24 @@ function YubikeySuccess() {
       }
       key={DEVICE_STEPS.YUBIKEY_SUCCESS}
       title={translate('yubikey_setup_success_title')}
-      subTitle={translate('yubikey_setup_success_subtitle_close')}
+      subTitle={translate('yubikey_setup_success_subtitle')}
+      warnings={[<SeedWarning />]}
+      primaryButton={
+        <DefaultButton
+          onClick={onExport}
+          data-testid='yubikey-setup-success-cta-export'
+        >
+          {translate('yubikey_setup_success_cta_export')}
+        </DefaultButton>
+      }
+      secondaryButton={
+        <SecondaryButton
+          onClick={onSkip}
+          data-testid='yubikey-setup-success-skip-button'
+        >
+          {translate('yubikey_setup_success_cta_skip')}
+        </SecondaryButton>
+      }
     />
   )
 }
@@ -369,7 +355,7 @@ function YubikeyError() {
   const { translate } = useTranslate()
   const { onForward } = useDeviceNavigation()
 
-  const { subtitle, tips } = useMemo(() => {
+  const { subtitle, tips, errorReference } = useMemo(() => {
     if (walletError?.code != null) {
       switch (walletError.code) {
         case PasskeyErrorCodes.USER_EXITED:
@@ -385,6 +371,7 @@ function YubikeyError() {
           return {
             subtitle: translate('yubikey_error_dismissed'),
             tips: [translate('yubikey_error_tip_reauth')],
+            errorReference: supportReferenceFor(walletError),
           }
       }
     }
@@ -410,6 +397,7 @@ function YubikeyError() {
       default:
         return {
           subtitle: translate('yubikey_error_dismissed'),
+          errorReference: supportReferenceFor(passkeyError),
           tips: [
             translate('yubikey_error_tip_firmware_short', {
               checkFirmwareLink: DEVICE_LINKS.TROUBLESHOOT_YUBIKEY_FIRMWARE,
@@ -435,6 +423,7 @@ function YubikeyError() {
 
   return (
     <DeviceConfirmation
+      errorReference={errorReference}
       key={DEVICE_STEPS.YUBIKEY_ERROR}
       titleIcon={
         <AlertCircleThin
@@ -450,7 +439,7 @@ function YubikeyError() {
       title={translate('yubikey_error_title')}
       subTitle={subtitle}
       primaryButton={
-        <DefaultButton onClick={onTryAgain}>
+        <DefaultButton onClick={onTryAgain} data-testid='try-again-button'>
           {translate('try_again')}
         </DefaultButton>
       }
@@ -488,9 +477,19 @@ function SeedWarning() {
 }
 
 // The provider-wrapped controller of all Yubikey register steps
-export default function YubikeyRegister({ device }: { device: Device }) {
+export default function YubikeyRegister({
+  device,
+  jwt,
+}: {
+  device: Device
+  jwt: string
+}) {
   return (
-    <WebWalletProvider device={device}>
+    <WebWalletProvider
+      device={device}
+      deviceType={DEVICE_TYPE.YUBIKEY}
+      jwt={jwt}
+    >
       <section
         css={css`
           max-width: 620px;
@@ -514,6 +513,19 @@ export const YUBIKEY_EXPORT_STEPS = [
 ]
 
 export const YUBIKEY_SETUP_STEPS = [
+  DEVICE_STEPS.YUBIKEY_START,
+  DEVICE_STEPS.YUBIKEY_INTERACT_PASSKEY,
+  DEVICE_STEPS.YUBIKEY_SETUP_CONFIRM,
+  DEVICE_STEPS.YUBIKEY_INTERACT_WALLET,
+  DEVICE_STEPS.YUBIKEY_SUCCESS,
+  DEVICE_STEPS.YUBIKEY_ERROR,
+  ...YUBIKEY_EXPORT_STEPS,
+]
+
+export const YUBIKEY_COPY_STEPS = [
+  DEVICE_STEPS.DEVICE_SELECTION,
+  DEVICE_STEPS.YUBIKEY_COPY_EXPORT_START,
+  DEVICE_STEPS.YUBIKEY_COPY_EXPORT_LOAD,
   DEVICE_STEPS.YUBIKEY_START,
   DEVICE_STEPS.YUBIKEY_INTERACT_PASSKEY,
   DEVICE_STEPS.YUBIKEY_SETUP_CONFIRM,

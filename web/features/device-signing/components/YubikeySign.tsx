@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 
 import Spacer from 'src/components/Spacer'
 import COLOR from 'src/constants/color'
+import { DEVICE_TYPE } from 'src/constants/device'
 import LINK from 'src/constants/link'
 import { Signature } from 'src/constants/signature'
 import {
@@ -22,6 +23,8 @@ import {
   WebWalletProvider,
   useWebWallet,
 } from 'src/features/device-signing/hooks/useWebWallet'
+import { supportReferenceFor } from 'src/features/device-signing/utils/parseError'
+import BackToPortalButton from 'src/features/transaction-portal/components/BackToPortalButton'
 import useTranslate from 'src/hooks/useTranslate'
 import { ReactComponent as AlertCircleThin } from 'src/images/alert-circle-thin-icon.svg'
 import { ReactComponent as CheckmarkCircleThin } from 'src/images/checkmark-circle-thin-icon.svg'
@@ -85,13 +88,14 @@ export function YubikeyStart() {
       key={DEVICE_STEPS.YUBIKEY_START}
       title={translate('yubikey_sign_start_title')}
       primaryButton={
-        <DefaultButton onClick={onContinue}>
+        <DefaultButton onClick={onContinue} data-testid='continue-button'>
           {translate('continue')}
         </DefaultButton>
       }
       secondaryButton={
         <SecondaryButton
           onClick={() => onForward(DEVICE_STEPS.DEVICE_SELECTION)}
+          data-testid='choose-different-device-button'
         >
           {translate('choose_different_device')}
         </SecondaryButton>
@@ -184,7 +188,7 @@ function YubikeySignLoading() {
 // Success state for the Yubikey signing process
 function YubikeySignSuccess() {
   const { translate } = useTranslate()
-  const { isHealthCheck } = useWebWallet()
+  const { isHealthCheck, isTransaction } = useWebWallet()
 
   const { title, subtitle } = isHealthCheck
     ? {
@@ -212,6 +216,10 @@ function YubikeySignSuccess() {
       key={DEVICE_STEPS.YUBIKEY_SUCCESS}
       title={title}
       subTitle={subtitle}
+      // Transactions only — health checks have no portal to go back to.
+      secondaryButton={
+        isTransaction === true ? <BackToPortalButton /> : undefined
+      }
     />
   )
 }
@@ -259,6 +267,12 @@ function YubikeySignError() {
     return translate('yubikey_error_dismissed')
   }, [signError, translate, translateWithFallback])
 
+  const errorReference =
+    signError?.code === PasskeyErrorCodes.FAILED_READ ||
+    signError?.code === PasskeyErrorCodes.INVALID_SUBMISSION
+      ? undefined
+      : supportReferenceFor(signError)
+
   const supportInfo =
     isHealthCheck === true
       ? translate('yubikey_error_footer_health', {
@@ -280,6 +294,7 @@ function YubikeySignError() {
 
   return (
     <DeviceConfirmation
+      errorReference={errorReference}
       key={DEVICE_STEPS.YUBIKEY_ERROR}
       titleIcon={
         <AlertCircleThin
@@ -295,7 +310,7 @@ function YubikeySignError() {
       title={translate('yubikey_error_title')}
       subTitle={subtitle}
       primaryButton={
-        <DefaultButton onClick={onTryAgain}>
+        <DefaultButton onClick={onTryAgain} data-testid='try-again-button'>
           {translate('try_again')}
         </DefaultButton>
       }
@@ -314,18 +329,22 @@ export default function YubikeySign({
   isTransaction,
   signature,
   transactionInputs,
+  jwt,
 }: {
   signature: Signature
   transactionInputs?: TransactionInputs
   isHealthCheck?: boolean
   isTransaction?: boolean
+  jwt: string
 }) {
   return (
     <WebWalletProvider
       signature={signature}
+      deviceType={DEVICE_TYPE.YUBIKEY}
       isHealthCheck={isHealthCheck}
       isTransaction={isTransaction}
       transactionInputs={transactionInputs}
+      jwt={jwt}
     >
       <section
         css={css`

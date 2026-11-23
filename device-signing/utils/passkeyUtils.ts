@@ -16,7 +16,7 @@ import {
   base64urlToBase64,
   normalizeBase64OrBase64UrlString,
   stringToArrayBuffer,
-} from '@casa/common/src/lib/encodingUtils'
+} from 'casa-common/src/utils/encodingUtils'
 
 export const PUBLIC_KEY_CREDENTIAL_TYPE = 'public-key' as const
 type Base64String = string
@@ -28,12 +28,17 @@ export enum PasskeyErrorCodes {
   INCORRECT_STATE = 'INCORRECT_STATE',
   ALREADY_REGISTERED = 'ALREADY_REGISTERED',
   DUPLICATE = 'DUPLICATE',
+  NOT_BACKED_UP = 'NOT_BACKED_UP',
+  // The server refused the passkey provider (AAGUID) for this purpose.
+  PROVIDER_NOT_ALLOWED = 'PROVIDER_NOT_ALLOWED',
   FAILED_READ = 'UNABLE_TO_READ',
   FAILED_WRITE = 'UNABLE_TO_WRITE',
   USER_EXITED = 'USER_EXITED',
   UNAUTHORIZED = 'UNAUTHORIZED',
   NOT_ALLOWED = 'NOT_ALLOWED',
   UNABLE_TO_CONNECT = 'UNABLE_TO_CONNECT',
+  // The server rejected this bundle's request shape; a page reload fixes it.
+  OUTDATED_CLIENT = 'OUTDATED_CLIENT',
   UNKNOWN = 'UNKNOWN',
 }
 
@@ -46,6 +51,13 @@ export enum PasskeyErrorCodes {
  * multiple prompts.
  */
 const PROMPT_TIMEOUT_MS = 60000
+
+/**
+ * Default WebAuthn user verification requirement used across assertion and attestation paths.
+ * Centralised here so the UV policy cannot drift between call sites.
+ */
+export const DEFAULT_USER_VERIFICATION: UserVerificationRequirement =
+  'preferred'
 
 /**
  * Accepts parameters from server-side options requests and re-encodes to accommodate the
@@ -80,6 +92,7 @@ export const writeLargeBlob = async ({
           id: bufferId,
         },
       ],
+      userVerification: options.userVerification ?? DEFAULT_USER_VERIFICATION,
       timeout: PROMPT_TIMEOUT_MS,
       extensions: {
         // @ts-expect-error - navigator credentials do not provide type definitions for largeBlob
@@ -169,6 +182,7 @@ export const readLargeBlob = async ({
     publicKey: {
       challenge: bufferChallenge,
       allowCredentials,
+      userVerification: options.userVerification ?? DEFAULT_USER_VERIFICATION,
       timeout: PROMPT_TIMEOUT_MS,
       extensions: {
         // @ts-expect-error - navigator credentials do not provide type definitions for largeBlob
@@ -211,6 +225,57 @@ export const readLargeBlob = async ({
   return blobString
 }
 
+export const PRF_OUTPUT_BYTE_LENGTH = 32
+
+/**
+ * Normalizes a WebAuthn PRF extension result to a fresh 32-byte ArrayBuffer.
+ *
+ * Spec-compliant clients return `prf.results.first` as an ArrayBuffer, but the
+ * 1Password browser extension currently returns a plain Array of bytes instead
+ * (their bug FS-5593), which SubtleCrypto rejects. Accept both — plus
+ * ArrayBuffer views for safety — so PRF-based derivation works the same
+ * whether or not 1Password has shipped their fix; the bytes are identical in
+ * either container, so the derived key material does not change.
+ *
+ * Anything else is rejected loudly: PRF output is vault key material, and a
+ * mangled container must fail the read rather than derive a plausible-but-wrong
+ * key.
+ */
+export function normalizePrfOutput(prfResult: unknown): ArrayBuffer {
+  let bytes: Uint8Array | null = null
+
+  if (prfResult instanceof ArrayBuffer) {
+    bytes = new Uint8Array(prfResult)
+  } else if (ArrayBuffer.isView(prfResult)) {
+    bytes = new Uint8Array(
+      prfResult.buffer,
+      prfResult.byteOffset,
+      prfResult.byteLength,
+    )
+  } else if (Array.isArray(prfResult)) {
+    const isByteArray = prfResult.every(
+      (value) =>
+        typeof value === 'number' &&
+        Number.isInteger(value) &&
+        value >= 0 &&
+        value <= 255,
+    )
+    if (isByteArray) {
+      bytes = Uint8Array.from(prfResult as number[])
+    }
+  }
+
+  if (bytes == null || bytes.length !== PRF_OUTPUT_BYTE_LENGTH) {
+    throw new PasskeyError(
+      `PRF result is not a ${PRF_OUTPUT_BYTE_LENGTH}-byte value`,
+      PasskeyErrorCodes.FAILED_READ,
+    )
+  }
+
+  // Return a fresh copy so callers never hold a view into shared memory.
+  return bytes.slice().buffer
+}
+
 /**
  * Extract and encode the large blob and PRF results for client side storage, and remove
  * sensitive data from the authentication response before sending to the server.
@@ -219,10 +284,12 @@ export function sanitizeAuthenticationResponse(
   authenticationResponse: AuthenticationResponseJSON,
   support?: PasskeySupportOutputs,
 ): SanitizedAuthenticationResponse {
-  // navigator credentials do not provide type support for experimental extension o clientExtensionResults
+  // navigator credentials do not provide type support for experimental extension on clientExtensionResults
   const clientExtensionResults =
     authenticationResponse.clientExtensionResults as {
-      prf?: { results?: { first?: Buffer } }
+      // `first` is `unknown` because non-compliant clients (1Password's
+      // extension) deliver a plain Array here instead of an ArrayBuffer.
+      prf?: { results?: { first?: unknown } }
       largeBlob?: { blob?: Buffer }
     }
 
@@ -271,7 +338,9 @@ export function sanitizeAuthenticationResponse(
   }
 
   if (prf?.results?.first != null) {
-    result.prf = arrayBufferToBase64String(prf.results.first)
+    result.prf = arrayBufferToBase64String(
+      normalizePrfOutput(prf.results.first),
+    )
   }
 
   return result
@@ -303,6 +372,9 @@ export type ErrorHandler = (error: PasskeyError | Error) => void | Promise<void>
 export class PasskeyError extends Error {
   code: PasskeyErrorCodes
   data: unknown
+  // Support reference for this failure. The web error parser sets it and logs
+  // the same value, so the error screen and Datadog match.
+  errorReference?: string
 
   constructor(message: string, code: PasskeyErrorCodes, data?: unknown) {
     super(message)
@@ -311,13 +383,10 @@ export class PasskeyError extends Error {
   }
 
   /**
-   *  Override https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/toString to include the
-   * error code and custom-added data
+   * Return only the error code and message. Error data can contain secrets.
    */
   toString() {
-    const title = `${this.code}: ${this.message}`
-    const data = this.data != null ? `-${JSON.stringify(this.data)}` : ''
-    return `${title}${data}`
+    return `${this.code}: ${this.message}`
   }
 }
 
@@ -328,7 +397,12 @@ export function encodeAttestationOptionsToRaw(
     publicKey: {
       ...options,
       challenge: base64ToUint8Array(options.challenge),
-      userVerification: 'discouraged',
+      authenticatorSelection: {
+        ...options.authenticatorSelection,
+        userVerification:
+          options.authenticatorSelection?.userVerification ??
+          DEFAULT_USER_VERIFICATION,
+      },
       excludeCredentials: options.excludeCredentials?.map((credential) => ({
         ...credential,
         id: base64ToUint8Array(credential.id),
@@ -382,7 +456,26 @@ export async function createRawCredential(
   options: PublicKeyCredentialCreationOptionsJSON,
 ): Promise<RegistrationResponseJSON> {
   const rawOptions = encodeAttestationOptionsToRaw(options)
-  const rawResponse = await navigator.credentials.create(rawOptions)
+  let rawResponse: Credential | null
+  try {
+    rawResponse = await navigator.credentials.create(rawOptions)
+  } catch (error) {
+    // WebAuthn signals "this authenticator already holds a credential listed
+    // in excludeCredentials" as a DOMException named InvalidStateError (legacy
+    // code 11). For Casa that means the chosen provider (e.g. the user's
+    // iCloud Keychain) already stores one of the excluded credentials — most
+    // often their login passkey, which for security may not share hardware
+    // with a signing key. Surface it as ALREADY_REGISTERED so the UI can say
+    // so instead of the generic "prompt was dismissed" copy.
+    if (error instanceof DOMException && error.name === 'InvalidStateError') {
+      throw new PasskeyError(
+        'Authenticator already contains an excluded credential',
+        PasskeyErrorCodes.ALREADY_REGISTERED,
+        { name: error.name, message: error.message },
+      )
+    }
+    throw error
+  }
   return encodeAttestationResponseToVerify(
     rawResponse,
   ) as RegistrationResponseJSON
